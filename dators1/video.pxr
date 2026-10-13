@@ -1,0 +1,903 @@
+@ /video root:video {
+  .renderer OpenGL
+  .width 1280
+  .height 720
+  .fps 60.0
+  .smooth false
+  @ ./screen video:output {
+    .meta [map graph.x 1541 graph.y 121 graph.comment "final render"]
+    .device 2
+    .width 3840
+    .height 2160
+    .rotation 0
+    .undecorated true
+    .show-cursor true
+  }
+  @ ./start-trigger-1 core:start-trigger {
+    .meta [map graph.x 45 graph.y 27]
+  }
+  @ ./capture-1 video:capture {
+    .meta [map graph.x 58 graph.y 121]
+    .code {import org.praxislive.video.gstreamer.*;
+
+    enum ResizeMode {Stretch, Scale, Crop};
+    
+    @T(1) Trigger play;
+    @T(2) Trigger stop;
+    
+    @P(1) @Type.String(emptyIsDefault = true, suggested = {"", "1", "2", "3", "4"})
+    Property device;
+    @P(2)
+    ResizeMode resizeMode;
+    @P(3) @Type.Number(min = 0, max = 1, def = 0.5)
+    double alignX;
+    @P(4) @Type.Number(min = 0, max = 1, def = 0.5)
+    double alignY;
+    @P(5) @Type.Number(min = 0, max = 8, def = 1, skew = 4)
+    double zoom;
+    @P(6) @Config.Port(false)
+    Property sourceWidth;
+    @P(7) @Config.Port(false)
+    Property sourceHeight;
+    @P(8) @Config.Port(false)
+    Property sourceFps;
+    @P(9) @ReadOnly
+    String state;
+    
+    @Inject VideoCapture capture;
+
+    @AuxOut(1) Output ready;
+    @AuxOut(2) Output error;
+    @AuxOut(3) Output eos;
+    
+
+    @Override
+    public void init() {
+        device.linkAs(Value::toString, capture::device);
+        play.link(() -> {
+            capture.requestFrameSize(I(sourceWidth), I(sourceHeight))
+                    .requestFrameRate(D(sourceFps))
+                    .play();
+        });
+        stop.link(capture::stop);
+        capture.onReady(ready::send);
+        capture.onError(msg -> {
+            log(ERROR, msg);
+            error.send(msg);
+        });
+        capture.onEOS(eos::send);
+    }
+
+    @Override
+    public void draw() {
+        capture.render(this::drawFrame);
+        state = capture.state().toString();
+        
+        // DEBUG START
+        // System.out.println( "capture component = " + width + " x " + height + ", source = " + I(sourceWidth) + " x " + I(sourceHeight) );
+        // DEBUG END
+
+    capture.render(this::drawFrame);
+    state = capture.state().toString();         
+    }
+
+    void drawFrame(PImage frame) {
+        double outWidth = zoom * frame.width;
+        double outHeight = zoom * frame.height;
+        if (resizeMode == ResizeMode.Stretch) {
+            outWidth *= (double) width / frame.width;
+            outHeight *= (double) height / frame.height;
+        } else if (resizeMode == ResizeMode.Scale) {
+            double r = min((double) width / frame.width, (double) height / frame.height);
+            outWidth *= r;
+            outHeight *= r;
+        }
+        image(frame, alignX * (width - outWidth), alignY * (height - outHeight), outWidth, outHeight);
+    }
+    
+}
+    .device 3
+    .source-width 1280
+    .source-height 720
+  }
+  @ ./custom-1 video:custom {
+    .meta [map graph.x 243 graph.y 121 graph.comment "video left-right reflection"]
+    .code {
+@In(1) PImage in ;
+
+    
+    @Override
+    public void setup() {
+    }
+    
+    @Override
+    public void draw() {
+        
+        // DEBUG START
+        // System.out.println("custom-1: " + width + " x " + height);
+        // System.out.println("input: " + in.width + " x " + in.height);
+        // DEBUG END
+        
+        // flip left and right
+        translate(in.width,0);
+        scale(-1,1);
+        image(in,0,0);
+        
+    }
+    
+}
+  }
+  @ ./p2d-1 video:gl:p2d {
+    .meta [map graph.x 729 graph.y 121 graph.comment "pixelate and highlight"]
+    .code {
+    @In(1) PImage in;
+    @P(1) @Type.String(mime = GLSL_FRAGMENT_MIME) String fragment = "";
+    PShader shader;
+    
+    // Screenshot setup
+    String prefix = "/home/janis/PraxisLIVE Projects/zinatnieku-nakts/screenshots";
+    @Out(1) Output screencapNow;
+    boolean wasSpace = false;
+    
+    // Pixel change setup
+    @Out Output ccOut;
+    int coeff = 0;
+    boolean wasUp = false;
+    boolean wasDown = false;
+    int[] cellCountX = {10, 12, 18, 28, 42, 60, 80, 100, 140, 170, 200, 250, 300, 350, 400, 450, 520, 580, 650, 720, 800};
+    void nextCoeff() { 
+        coeff = (coeff+1) % cellCountX.length;
+        ccOut.send(cellCountX[coeff]);
+    };
+    void prevCoeff() {
+        coeff = (((coeff-1) % cellCountX.length) + cellCountX.length ) % cellCountX.length; // loops back to top
+        ccOut.send(cellCountX[coeff]);
+    };
+    @Out(2) Output upCoeff;
+    @Out(3) Output downCoeff;
+    
+    // Threshold setup
+    @Out Output thOut;
+    float threshold = 0.0f;
+    boolean wasLeft = false;
+    boolean wasRight = false;
+    void nextThreshold() { 
+        threshold = Math.min(threshold+1.0f, levels);
+        thOut.send(threshold);
+    };
+    void prevThreshold() {
+        threshold = Math.max(threshold-1.0f, 0.0f);
+        thOut.send(threshold);
+    };
+    
+    // Levels setup
+    @Out Output lvOut;
+    float levels = 10.0f;
+    boolean wasZ = false;
+    boolean wasX = false;
+    void nextLevel() { 
+        levels = Math.min(levels+1.0f, 20.0f);
+        lvOut.send(levels);
+    };
+    void prevLevel() {
+        levels = Math.max(levels-1.0f, 5.0f);
+        lvOut.send(levels);
+        threshold = Math.min(threshold, levels);
+        thOut.send(threshold);
+    };
+
+    @Override
+    public void setup() {
+        shader = createShader(DEFAULT_VERTEX_SHADER,fragment);
+    }
+    
+    @Override
+    public void draw() {
+        
+        // Input size is 800x600 (or 1920x1080?)
+        shader(shader);
+        
+        // Pixel change
+        boolean upbutton = keyPressed && keyCode == 38;
+        if (upbutton && !wasUp ) { 
+            nextCoeff();
+            upCoeff.send(); } 
+        wasUp = upbutton;
+        boolean downbutton = keyPressed && keyCode == 40;
+        if (downbutton && !wasDown ) {
+            prevCoeff();
+            downCoeff.send(); } 
+        wasDown = downbutton;
+        
+        // Threshold change
+        boolean leftbutton = keyPressed && keyCode == 39;
+        if (leftbutton && !wasLeft ) { nextThreshold(); } 
+        wasLeft = leftbutton;
+        boolean rightbutton = keyPressed && keyCode == 37;
+        if (rightbutton && !wasRight ) { prevThreshold(); } 
+        wasRight = rightbutton;
+        
+        // Levels change
+        boolean zbutton = keyPressed && keyCode == 88; // actually X
+        if (zbutton && !wasZ ) { nextLevel(); } 
+        wasZ = zbutton; 
+        boolean xbutton = keyPressed && keyCode == 90; // actually Z
+        if (xbutton && !wasX ) { prevLevel(); } 
+        wasX = xbutton;
+    
+        // Shader        
+        // shader.set("gridSizeX", 19.20f + coeff*19.20f);
+        // shader.set("gridSizeY", 10.80f + coeff*10.80f);
+
+        shader.set("gridSizeX", 1920.0f / cellCountX[coeff]);
+        shader.set("gridSizeY", 1920.0f / cellCountX[coeff]);        
+        
+        shader.set("levels", levels);        
+        shader.set("levelCutoff", threshold);   
+        
+        // shader.set("threshold", 0.5f);        
+        
+        image(in,0,0);
+        resetShader();
+
+        // Screenshot
+        boolean spacebutton = keyPressed && keyCode == 32;
+        if (spacebutton && !wasSpace ) { screencapNow.send(); } 
+        wasSpace = spacebutton;
+                
+        // Overlay
+        // fill(255);
+        // textSize(24);
+        // text(cellCountX[coeff], 20, 40);
+        
+    }
+
+}
+    .fragment {#ifdef GL_ES
+precision mediump float;
+precision mediump int;
+#endif
+ 
+uniform sampler2D texture;
+uniform vec2 texOffset;
+uniform float gridSizeX;
+uniform float gridSizeY;
+uniform float levels;
+uniform float levelCutoff;
+ 
+varying vec4 vertColor;
+varying vec4 vertTexCoord;
+ 
+void main() {
+ 
+    vec2 uv = vertTexCoord.st;
+
+    // Size of one grid cell in texture coordinates
+    vec2 cellSize = vec2(gridSizeX/1920.0f, gridSizeY/1080.0f);
+ 
+    // Which cell are we in?
+    vec2 cell = floor(uv / cellSize);
+ 
+    // Centre of that cell
+    vec2 cellCentre = (cell + 0.5) * cellSize;
+ 
+    // Number of samples across each cell
+    const int samplesX = 20;
+    const int samplesY = 20;
+ 
+    vec3 total = vec3(0.0); // color or grayscale
+    float totalGray = 0.0; // grayscale
+    // float total = 0.0; // threshold
+ 
+    for (int y = 0; y < samplesX; y++) {
+        for (int x = 0; x < samplesY; x++) {
+ 
+            vec2 offset = vec2(
+                (float(x) + 0.5) / float(samplesX) - 0.5,
+                (float(y) + 0.5) / float(samplesY) - 0.5
+            );
+ 
+            vec2 sampleUV = cellCentre + offset * cellSize;
+ 
+            // total += texture2D(texture, sampleUV).rgb; // color
+
+            float thisGray = dot(texture2D(texture, sampleUV).rgb, vec3(.299, .587, .114)); // grayscale
+            total += vec3(thisGray, thisGray, thisGray); // grayscale
+            totalGray += thisGray; // grayscale
+
+            // if ( thisGray < threshold ) { // highlight
+            //     total += vec3(0,1,0);
+            // } else { total += vec3(thisGray, thisGray, thisGray); }
+
+
+
+            //if ( dot(texture2D(texture, sampleUV).rgb, vec3(.299, .587, .114)) > threshold ) { // threshold
+            //    total += 1;
+            //} else {
+            //    total += 0;
+            //}
+
+
+        }
+    }
+ 
+    // vec3 average = total / float(samplesX * samplesY); // color or grayscale
+    // gl_FragColor = vec4(average, 1.0); // color or grayscale
+
+    float averageGray = totalGray / float(samplesX * samplesY); // quantized
+    float quantized = floor(averageGray * (levels-1) + 0.5) / (levels-1);
+    if ( quantized <= levelCutoff/(levels-1)) {
+        gl_FragColor = vec4(0,1,0, 1.0);
+    } else {   
+        gl_FragColor = vec4(quantized, quantized, quantized, 1.0);
+    }
+
+    // float average = total / float(samplesX * samplesY); // threshold
+    // gl_FragColor = vec4(average, average, average, 1.0); // threshold
+}}
+  }
+  @ ./composite-1 video:composite {
+    .meta [map graph.x 1020 graph.y 121 graph.comment "combine foreground and background"]
+    .code {
+    @In(1) PImage in;
+    @In(2) PImage src;
+    @In(2) PImage src_tmp;
+
+    @P(1) BlendMode mode;
+    @P(2) @Type.Number(min = 0, max = 1, def = 1) double mix;
+    @P(3) boolean forceAlpha;
+
+    @Persist Async<PBytes> watchInResponse, watchSrcResponse;
+
+    @Override
+    public void init() {
+        attachAlphaQuery("src", outAlpha -> outAlpha || forceAlpha);
+    }
+
+    @Override
+    public void draw() {
+        checkWatches();
+        copy(in);
+        release(in);
+        blendMode(mode, mix);
+        image(src, 0, 0);
+    }
+
+    @FN.Watch(mime = MIME_PNG, relatedPort = "in")
+    Async<PBytes> watchIn() {
+        if (watchInResponse == null || watchInResponse.failed()) {
+            watchInResponse = timeout(1, new Async<>());
+        }
+        return watchInResponse;
+    }
+
+    @FN.Watch(mime = MIME_PNG, relatedPort = "src")
+    Async<PBytes> watchSrc() {
+        if (watchSrcResponse == null || watchSrcResponse.failed()) {
+            watchSrcResponse = timeout(1, new Async<>());
+        }
+        return watchSrcResponse;
+    }
+
+    private void checkWatches() {
+        double size = max(width, height);
+        double scale = size > 800 ? 400 / size : 0.5;
+        if (watchInResponse != null) {
+            Async.bind(write(MIME_PNG, in, scale), watchInResponse);
+            watchInResponse = null;
+        }
+        if (watchSrcResponse != null) {
+            Async.bind(write(MIME_PNG, src, scale), watchSrcResponse);
+            watchSrcResponse = null;
+        }
+    }
+
+}
+    .mix 0.7
+  }
+  @ ./custom-2 video:custom {
+    .meta [map graph.x 243 graph.y 422 graph.comment "export: source.png"]
+    .code {import java.awt.KeyboardFocusManager;
+import java.awt.KeyEventDispatcher;
+import java.awt.event.KeyEvent;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.time.Instant;
+// import java.io.InputStream;
+// import java.awt.image.BufferedImage;
+// import javax.imageio.ImageIO;
+
+    
+    @In(1) PImage in;
+    
+    // Screenshot setup
+    String outputDir = "/home/janis/PraxisLIVE Projects/zinatnieku-nakts/screenshots/";
+    boolean exporting = false;
+    @T(2) void screencapNow() { exporting = true; }
+    @Out(1) Output doneSource;
+    Async<PBytes> pendingPNG;
+    Path pendingFile;
+    
+    @Override
+    public void init() {
+        pendingPNG = null;
+        pendingFile = null;
+    }
+
+    @Override
+    public void draw() {
+        
+        if (pendingPNG != null && pendingPNG.done()) {
+            try {
+                if (pendingPNG.failed()) {
+                    System.out.println("PNG encoding failed:");
+                    System.out.println(pendingPNG.error());
+                } else {
+                    PBytes png = pendingPNG.result();
+                    
+                    // DEBUG START
+                    // try (InputStream in = png.asInputStream()) {
+                    //     BufferedImage image = ImageIO.read(in);
+                    //     System.out.println(image.getWidth() +" x "+image.getHeight());}
+                    // System.out.println("export input: " + in.width + " x " + in.height);
+                    // DEBUG END
+                    
+                    Files.copy( png.asInputStream(), pendingFile, StandardCopyOption.REPLACE_EXISTING );
+                    doneSource.send();
+                }
+            } catch (Exception e) {
+                System.out.println("PNG export error:");
+                System.out.println(e);
+            } finally {
+                pendingPNG = null;
+                pendingFile = null;
+            }
+        }
+
+        if (in == null) { return; }
+        if (exporting && pendingPNG == null) {
+            pendingFile = Paths.get( outputDir, "source.png" );
+            pendingPNG = write( MIME_PNG, in );
+            System.out.println( " * Exported source.png" );
+            exporting = false;
+        }
+        copy(in);
+        release(in);
+    }    
+    
+}
+  }
+  @ ./custom-3 video:custom {
+    .meta [map graph.x 718 graph.y 422 graph.comment "export: overlay_groundtruth.png"]
+    .code {import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.time.Instant;
+
+    @In(1) PImage in;
+
+    // Screenshots setup
+    String outputDir = "/home/janis/PraxisLIVE Projects/zinatnieku-nakts/screenshots/";
+    boolean exporting = false;
+    @T(2) void screencapNow() { exporting = true; }
+    @Out(1) Output doneOverlay;
+    
+    Async<PBytes> pendingOverlayPNG;
+    Path pendingOverlayFile;
+    
+    @Override
+    public void init() {
+        pendingOverlayPNG = null;
+        pendingOverlayFile = null;
+    }
+
+    @Override
+    public void draw() {
+        
+        // Check every frame what is happening to overlay
+        if (pendingOverlayPNG != null && pendingOverlayPNG.done()) {
+            try {
+                if (pendingOverlayPNG.failed()) {
+                    System.out.println("PNG encoding of overlay failed:");
+                    System.out.println(pendingOverlayPNG.error());
+                } else {
+                    PBytes png = pendingOverlayPNG.result();
+                    Files.copy( png.asInputStream(), pendingOverlayFile, StandardCopyOption.REPLACE_EXISTING );
+                    doneOverlay.send(); }
+            } catch (Exception e) {
+                System.out.println("PNG overlay export error:");
+                System.out.println(e);
+            } finally {
+                pendingOverlayPNG = null;
+                pendingOverlayFile = null; } }
+        
+        if (in == null) { return; }
+        
+        // Export overlay
+        if (exporting && pendingOverlayPNG == null) {
+            pendingOverlayFile = Paths.get( outputDir, "overlay_groundtruth.png" );
+            pendingOverlayPNG = write( MIME_PNG, in );
+            
+            System.out.println( " * Exported overlay_groundtruth.png" );
+            exporting = false;
+        }
+        copy(in); 
+        release(in);
+    }    
+    
+}
+  }
+  @ ./p2d-2 video:gl:p2d {
+    .meta [map graph.x 507 graph.y 121 graph.comment "only pixelate
+"]
+    .code {
+    @In(1) PImage in;
+    @P(1) @Type.String(mime = GLSL_FRAGMENT_MIME) String fragment = "";
+    PShader shader;
+    
+    // Screenshot setup
+    String prefix = "/home/janis/PraxisLIVE Projects/zinatnieku-nakts/screenshots";
+    
+    // Pixel change setup
+    int cc = 10;
+    @In(1) void ccIn(int value) { cc = value; }
+
+    // Levels change setup
+    float lv = 10.0f;
+    @In(2) void lvIn(int value) { lv = value; }
+    
+    
+    @Override
+    public void setup() {
+        shader = createShader(DEFAULT_VERTEX_SHADER,fragment);
+    }
+    
+    @Override
+    public void draw() {
+        
+        // Input size is 800x600 (or 1920x1080?)
+        shader(shader);
+
+        // Shader        
+        // shader.set("gridSizeX", 19.20f + coeff*19.20f);
+        // shader.set("gridSizeY", 10.80f + coeff*10.80f);
+
+        shader.set("gridSizeX", 1920.0f / cc);
+        shader.set("gridSizeY", 1920.0f / cc);
+
+        shader.set("levels", lv);        
+        // shader.set("levelCutoff", 1.0f);   
+        
+        // shader.set("threshold", 0.4f);        
+        
+        image(in,0,0);
+        resetShader();
+        
+    }
+
+}
+    .fragment {#ifdef GL_ES
+precision mediump float;
+precision mediump int;
+#endif
+ 
+uniform sampler2D texture;
+uniform vec2 texOffset;
+uniform float gridSizeX;
+uniform float gridSizeY;
+uniform float threshold;
+uniform float levels;
+uniform float levelCutoff;
+ 
+varying vec4 vertColor;
+varying vec4 vertTexCoord;
+ 
+void main() {
+ 
+    vec2 uv = vertTexCoord.st;
+
+    // Size of one grid cell in texture coordinates
+    vec2 cellSize = vec2(gridSizeX/1920.0f, gridSizeY/1080.0f);
+ 
+    // Which cell are we in?
+    vec2 cell = floor(uv / cellSize);
+ 
+    // Centre of that cell
+    vec2 cellCentre = (cell + 0.5) * cellSize;
+ 
+    // Number of samples across each cell
+    const int samplesX = 20;
+    const int samplesY = 20;
+ 
+    vec3 total = vec3(0.0); // color or grayscale
+    float totalGray = 0.0; // grayscale
+    // float total = 0.0; // threshold
+ 
+    for (int y = 0; y < samplesX; y++) {
+        for (int x = 0; x < samplesY; x++) {
+ 
+            vec2 offset = vec2(
+                (float(x) + 0.5) / float(samplesX) - 0.5,
+                (float(y) + 0.5) / float(samplesY) - 0.5
+            );
+ 
+            vec2 sampleUV = cellCentre + offset * cellSize;
+ 
+            // total += texture2D(texture, sampleUV).rgb; // color
+
+            float thisGray = dot(texture2D(texture, sampleUV).rgb, vec3(.299, .587, .114)); // grayscale
+            total += vec3(thisGray, thisGray, thisGray); // grayscale
+            totalGray += thisGray; // grayscale
+
+            // if ( thisGray < threshold ) { // highlight
+            //     total += vec3(0,1,0);
+            // } else { total += vec3(thisGray, thisGray, thisGray); }
+
+
+
+            //if ( dot(texture2D(texture, sampleUV).rgb, vec3(.299, .587, .114)) > threshold ) { // threshold
+            //    total += 1;
+            //} else {
+            //    total += 0;
+            //}
+
+
+        }
+    }
+ 
+    // vec3 average = total / float(samplesX * samplesY); // color or grayscale
+    // gl_FragColor = vec4(average, 1.0); // color or grayscale
+
+    float averageGray = totalGray / float(samplesX * samplesY); // quantized
+    float quantized = floor(averageGray * (levels-1) + 0.5) / (levels-1);
+    gl_FragColor = vec4(quantized, quantized, quantized, 1.0);
+
+    // float average = total / float(samplesX * samplesY); // threshold
+    // gl_FragColor = vec4(average, average, average, 1.0); // threshold
+}}
+  }
+  @ ./custom-4 video:custom {
+    .meta [map graph.x 494 graph.y 422 graph.comment "export: grayscale.png"]
+    .code {import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.time.Instant;
+
+    @In(1) PImage in;
+
+    // Screenshot setup
+    String outputDir = "/home/janis/PraxisLIVE Projects/zinatnieku-nakts/screenshots/";
+    boolean exporting = false;
+    @T(2) void screencapNow() { exporting = true; }
+    @Out(1) Output doneGrayscale;
+    Async<PBytes> pendingPNG;
+    Path pendingFile;
+    
+    @Override
+    public void init() {
+        pendingPNG = null;
+        pendingFile = null;
+    }
+
+    @Override
+    public void draw() {
+        
+        if (pendingPNG != null && pendingPNG.done()) {
+            try {
+                if (pendingPNG.failed()) {
+                    System.out.println("PNG encoding failed:");
+                    System.out.println(pendingPNG.error());
+                } else {
+                    PBytes png = pendingPNG.result();
+                    Files.copy( png.asInputStream(), pendingFile, StandardCopyOption.REPLACE_EXISTING );
+                    doneGrayscale.send();
+                }
+            } catch (Exception e) {
+                System.out.println("PNG export error:");
+                System.out.println(e);
+            } finally {
+                pendingPNG = null;
+                pendingFile = null;
+            }
+        }
+
+        if (in == null) { return; }
+        if (exporting && pendingPNG == null) {
+            pendingFile = Paths.get( outputDir, "grayscale.png" );
+            pendingPNG = write( MIME_PNG, in );
+            System.out.println( " * Exported grayscale.png" );
+            exporting = false;
+        }
+        copy(in);
+        release(in);
+    }    
+    
+}
+  }
+  @ ./custom-6 core:custom {
+    .meta [map graph.x 1029 graph.y 636 graph.comment "send exports
+"]
+    .code {import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.time.Instant;
+import java.lang.ProcessBuilder;
+
+    
+    // Screenshot setup
+    String sourceDir = "/home/janis/PraxisLIVE Projects/zinatnieku-nakts/screenshots/";
+    String targetDir = "/home/janis/Documents/Darbi - algoti/2025-03 Latvijas Universitate/Projekti/2026-06-05 Zinatnieku nakts/screenshots";
+    boolean exporting = false;
+    boolean receivedSource = false;
+    boolean receivedGrayscale = false;
+    boolean receivedOverlay = false;
+    @T(1) void doneSource() { receivedSource = true; }
+    @T(2) void doneGrayscale() { receivedGrayscale = true; }
+    @T(3) void doneOverlay() { receivedOverlay = true; }    
+
+    // Levels setup
+    float lv = 10.0f;
+    @In(2) void lvIn(int value) { lv = value; }
+    
+    @Override
+    public void init() {
+
+    }
+
+    
+    @Override
+    public void update() {
+
+        if ( receivedSource && receivedGrayscale && receivedOverlay ) {
+            exporting = true;
+        }
+        
+        if ( exporting ) {
+
+            // Write level to file
+            String cmd = "echo \"" + lv + "\" > \"" + sourceDir + "levels.txt\"";
+            try {
+                ProcessBuilder pb = new ProcessBuilder("bash", "-c", cmd);
+                Process p = pb.start();
+                p.waitFor();
+                System.out.println( " * Wrote levels to file" );
+            } catch (Exception e) { System.out.println(" * ERROR");}
+            
+            // Export
+            cmd = "scp \"" +
+                    sourceDir + "source.png\" \"" + 
+                    sourceDir + "grayscale.png\" \"" + 
+                    sourceDir + "overlay_groundtruth.png\" \"" + 
+                    sourceDir + "levels.txt\" " + 
+                    "janis@192.168.50.2:\"" + targetDir + "\"";
+            try {
+                ProcessBuilder pb = new ProcessBuilder("bash", "-c", cmd);
+                Process p = pb.start();
+                p.waitFor();
+                System.out.println( Instant.now().toString().substring(11,19) + " : Sent 3 images and 1 text file" );
+            } catch (Exception e) { System.out.println(" * ERROR");}
+                      
+            
+            receivedSource = false;
+            receivedGrayscale = false;
+            receivedOverlay = false;
+            exporting = false;
+        }        
+        
+    }
+    
+}
+  }
+  @ ./p2d-3 video:gl:p2d {
+    .meta [map graph.x 1042 graph.y 422 graph.comment labelling]
+    .code {
+    @In PImage in;
+    int cc = 10;
+    @In(1) void ccIn(int value) { cc = value; }
+    int th = 0;
+    @In(2) void thIn(int value) { th = value; }
+    int lv = 10;
+    @In(3) void lvIn(int value) { lv = value; }
+    
+    @Override
+    public void setup() {
+    }
+
+    @Override
+    public void draw() {
+       
+        // show input
+        image(in,0,0);
+        
+        // overlay with text
+        fill(255);
+        textSize(24);
+        text("izšķirtspēja: "+cc, 20, 40);
+        text("melnā slieksnis: " + th + "/" + lv, 20, 70);
+    }
+}
+  }
+  @ ./snapshot-1 video:snapshot {
+    .meta [map graph.x 1279 graph.y 121 graph.comment "hold when screencap"]
+    .code {
+@In(1) PImage in;
+
+@T(1) boolean trigger;
+@T(2) boolean reset;
+
+@OffScreen PGraphics bg;
+
+boolean frozen = false;
+
+@Override
+public void draw() {
+    if (reset) {
+        reset();
+        reset = false;
+    }
+
+    if (trigger) {
+        trigger = false;
+
+        if (!frozen) {
+            // Capture the current live frame
+            bg.copy(in);
+            frozen = true;
+        } else {
+            // Resume live video
+            frozen = false;
+        }
+    }
+
+    if (frozen) {
+        image(bg, 0, 0);
+    } else {
+        image(in, 0, 0);
+    }
+}
+
+void reset() {
+    frozen = false;
+    bg.clear();
+}
+    
+}
+  }
+  @ ./delay-1 core:timing:delay {
+    .meta [map graph.x 1292 graph.y 422]
+    .time 5
+  }
+  ~ ./start-trigger-1!out ./capture-1!play
+  ~ ./capture-1!out ./custom-1!in
+  ~ ./custom-1!out ./composite-1!in
+  ~ ./custom-1!out ./custom-2!in
+  ~ ./custom-2!out ./p2d-1!in
+  ~ ./p2d-1!out ./custom-3!in
+  ~ ./p2d-1!screencap-now ./custom-2!screencap-now
+  ~ ./p2d-1!screencap-now ./custom-3!screencap-now
+  ~ ./p2d-2!out ./custom-4!in
+  ~ ./custom-2!out ./p2d-2!in
+  ~ ./p2d-1!screencap-now ./custom-4!screencap-now
+  ~ ./custom-4!out ./composite-1!src-tmp
+  ~ ./custom-4!done-grayscale ./custom-6!done-grayscale
+  ~ ./custom-2!done-source ./custom-6!done-source
+  ~ ./custom-3!out ./p2d-3!in
+  ~ ./p2d-1!cc-out ./p2d-3!cc-in
+  ~ ./p2d-1!cc-out ./p2d-2!cc-in
+  ~ ./p2d-3!out ./composite-1!src
+  ~ ./p2d-1!th-out ./p2d-3!th-in
+  ~ ./custom-3!done-overlay ./custom-6!done-overlay
+  ~ ./p2d-1!lv-out ./p2d-3!lv-in
+  ~ ./p2d-1!lv-out ./p2d-2!lv-in
+  ~ ./composite-1!out ./snapshot-1!in
+  ~ ./p2d-1!screencap-now ./delay-1!in
+  ~ ./p2d-1!screencap-now ./snapshot-1!trigger
+  ~ ./delay-1!out ./snapshot-1!reset
+  ~ ./snapshot-1!out ./screen!in
+  ~ ./p2d-1!lv-out ./custom-6!lv-in
+}
